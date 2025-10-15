@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Excel File Merger (XLS/XLSX)</title>
+    
+    <link rel="stylesheet" type="text/css" href="https://cdn.datatables.net/1.11.5/css/jquery.dataTables.css">
+    <link rel="stylesheet" type="text/css" href="https://cdn.datatables.net/buttons/2.2.2/css/buttons.dataTables.min.css">
+    
+    <style>
+        /* Basic styling for better visibility */
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        .controls { margin-bottom: 20px; border: 1px solid #ccc; padding: 15px; border-radius: 5px; }
+        #dataTableContainer { margin-top: 20px; }
+        .excel-file-input { margin-bottom: 8px; }
+    </style>
+</head>
+<body>
+
+    <h1>Excel File Merger Tool 🛠️ (XLS/XLSX/CSV)</h1>
+    
+    <div class="controls">
+        <h2>1. Upload Files</h2>
+        <div id="fileInputs">
+            <input type="file" class="excel-file-input" accept=".xlsx, .xls, .csv" multiple><br>
+        </div>
+        <button id="addFileInput">➕ Add More Files</button>
+        
+        <h2>2. Process</h2>
+        <button id="mergeButton" disabled>🚀 Merge Files</button>
+    </div>
+
+    <div id="dataTableContainer">
+        <h2>3. Merged Data</h2>
+        <p>Upload and merge files to see the data table here.</p>
+        <table id="mergedDataTable" class="display compact" style="width:100%">
+            </table>
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+    <script type="text/javascript" charset="utf8" src="https://cdn.datatables.net/1.11.5/js/jquery.dataTables.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.1.3/jszip.min.js"></script>
+    <script src="https://cdn.datatables.net/buttons/2.2.2/js/dataTables.buttons.min.js"></script>
+    <script src="https://cdn.datatables.net/buttons/2.2.2/js/buttons.html5.min.js"></script>
+
+    <script>
+        // Global variable to store the final merged data (rows) and column headers
+        let mergedData = [];
+        let headers = [];
+        let dataTableInstance = null; // To hold the DataTables object for destruction/reinitialization
+
+        // Utility function to enable/disable the merge button
+        const updateMergeButton = () => {
+            const hasFiles = Array.from(document.querySelectorAll('.excel-file-input'))
+                                   .some(input => input.files && input.files.length > 0);
+            document.getElementById('mergeButton').disabled = !hasFiles;
+        };
+
+        // Event listener for "Add More Files" button
+        document.getElementById('addFileInput').addEventListener('click', () => {
+            const newInput = document.createElement('input');
+            newInput.type = 'file';
+            newInput.className = 'excel-file-input';
+            newInput.accept = '.xlsx, .xls, .csv';
+            newInput.multiple = true;
+            
+            const lineBreak = document.createElement('br');
+            
+            document.getElementById('fileInputs').appendChild(newInput);
+            document.getElementById('fileInputs').appendChild(lineBreak);
+            newInput.addEventListener('change', updateMergeButton);
+            updateMergeButton();
+        });
+
+        // Initial check for merge button status
+        document.addEventListener('DOMContentLoaded', () => {
+            document.querySelectorAll('.excel-file-input').forEach(input => {
+                input.addEventListener('change', updateMergeButton);
+            });
+        });
+
+        // -----------------------------------------------------------
+        // CORE MERGE FUNCTION
+        // -----------------------------------------------------------
+
+        document.getElementById('mergeButton').addEventListener('click', async () => {
+            // Reset global data
+            mergedData = [];
+            headers = [];
+            
+            const fileInputs = document.querySelectorAll('.excel-file-input');
+            const files = Array.from(fileInputs).flatMap(input => Array.from(input.files));
+
+            if (files.length === 0) {
+                alert('Please select at least one file.');
+                return;
+            }
+
+            // Destroy previous DataTable instance if it exists
+            if (dataTableInstance) {
+                dataTableInstance.destroy();
+                $('#mergedDataTable thead').empty(); // Clear old headers
+                $('#mergedDataTable tbody').empty(); // Clear old body
+                dataTableInstance = null;
+            }
+            
+            // Show a processing message
+            document.getElementById('dataTableContainer').querySelector('p').textContent = 'Processing files... please wait.';
+            document.getElementById('dataTableContainer').querySelector('p').style.display = 'block';
+
+            // Process files sequentially
+            for (const file of files) {
+                await processFile(file);
+            }
+
+            // Check if any data was merged
+            if (mergedData.length > 0 && headers.length > 0) {
+                renderDataTable(headers, mergedData);
+            } else {
+                document.getElementById('dataTableContainer').querySelector('p').textContent = 'No valid data was read from the uploaded files.';
+                document.getElementById('dataTableContainer').querySelector('p').style.display = 'block';
+                // Also clear the table header/body just in case
+                $('#mergedDataTable thead').empty(); 
+                $('#mergedDataTable tbody').empty(); 
+            }
+        });
+
+        /**
+         * Reads an Excel/CSV file using SheetJS.
+         * @param {File} file - The file object to read.
+         */
+        function processFile(file) {
+            return new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    try {
+                        const data = new Uint8Array(e.target.result);
+                        // SheetJS reads XLS, XLSX, and CSV automatically from array buffer
+                        const workbook = XLSX.read(data, { type: 'array' });
+                        const sheetName = workbook.SheetNames[0];
+                        const worksheet = workbook.Sheets[sheetName];
+                        
+                        // Convert sheet to array of arrays (header: 1)
+                        const fileData = XLSX.utils.sheet_to_json(worksheet, { header: 1, raw: false });
+
+                        if (fileData.length === 0) {
+                            console.warn(`File ${file.name} is empty.`);
+                            return resolve();
+                        }
+
+                        const fileHeaders = fileData[0] || [];
+                        const fileRows = fileData.slice(1);
+
+                        // 1. Handle Headers (Only once: take the headers from the first file)
+                        if (headers.length === 0 && fileHeaders.length > 0) {
+                            // Ensure headers are non-empty and set them
+                            headers = fileHeaders;
+                        } 
+                        
+                        // 2. Append Rows
+                        // This simple merge assumes the column order is consistent.
+                        if (headers.length > 0 && fileHeaders.length === headers.length) {
+                            mergedData = mergedData.concat(fileRows);
+                        } else if (headers.length > 0) {
+                             console.warn(`Skipping rows from file ${file.name} due to header length mismatch (${fileHeaders.length} vs ${headers.length} columns).`);
+                        }
+
+                    } catch (error) {
+                        console.error(`Error processing file ${file.name}:`, error);
+                    }
+                    resolve();
+                };
+                reader.onerror = (error) => {
+                    console.error(`Error reading file ${file.name}:`, error);
+                    resolve();
+                };
+                reader.readAsArrayBuffer(file);
+            });
+        }
+
+        // -----------------------------------------------------------
+        // DATATABLES RENDER FUNCTION
+        // -----------------------------------------------------------
+
+        /**
+         * Initializes the DataTables display with the merged data.
+         */
+        function renderDataTable(cols, data) {
+            // 1. Prepare DataTables Columns config
+            const dtColumns = cols.map(header => ({ 
+                title: header,
+                defaultContent: "" 
+            }));
+
+            // 2. Initialize DataTables
+            dataTableInstance = $('#mergedDataTable').DataTable({
+                data: data,
+                columns: dtColumns,
+                destroy: true, // Important: allows re-initialization
+                paging: true,
+                pageLength: 25, // Default page length
+                lengthMenu: [ [10, 25, 50, -1], [10, 25, 50, "All"] ],
+                searching: true, // Enables filter/search box
+                ordering: true, // Enables column sorting
+                scrollX: true, // Handles wide tables
+                dom: 'lBfrtip', // Defines the order of elements (l=Length, B=Buttons, f=Filter, r=Processing, t=Table, i=Info, p=Pagination)
+                buttons: [
+                    {
+                        extend: 'excelHtml5',
+                        text: '⬇️ Download Current Data (Excel)',
+                        filename: 'merged_excel_data',
+                        // This ensures ONLY the currently filtered/sorted data is exported.
+                        exportOptions: {
+                            modifier: {
+                                search: 'applied', 
+                                order: 'applied'   
+                            }
+                        }
+                    }
+                ]
+            });
+
+            document.getElementById('dataTableContainer').querySelector('p').style.display = 'none';
+        }
+    </script>
+</body>
+</html>
