@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Excel File Merger (XLS/XLSX)</title>
+    <title>Excel File Merger (Custom Header Row)</title>
     
     <link rel="stylesheet" type="text/css" href="https://cdn.datatables.net/1.11.5/css/jquery.dataTables.css">
     <link rel="stylesheet" type="text/css" href="https://cdn.datatables.net/buttons/2.2.2/css/buttons.dataTables.min.css">
@@ -14,6 +14,9 @@
         .controls { margin-bottom: 20px; border: 1px solid #ccc; padding: 15px; border-radius: 5px; }
         #dataTableContainer { margin-top: 20px; }
         .excel-file-input { margin-bottom: 8px; }
+        /* Style for the new control */
+        .header-control { margin-bottom: 10px; padding: 10px; background-color: #f9f9f9; border: 1px dashed #ddd; border-radius: 3px; }
+        .header-control label { font-weight: bold; display: block; margin-bottom: 5px; }
     </style>
 </head>
 <body>
@@ -27,15 +30,19 @@
         </div>
         <button id="addFileInput">➕ Add More Files</button>
         
-        <h2>2. Process</h2>
+        <h2>2. Process Settings & Merge</h2>
+        <div class="header-control">
+            <label for="headerRowNumber">Header Row Number (1-based index):</label>
+            <input type="number" id="headerRowNumber" value="1" min="1" style="width: 80px; padding: 5px;" title="The row number that contains the column names. Row 1 is the first row of the file.">
+            <p style="font-size: 0.9em; color: #666; margin-top: 5px;">*Rows above this number will be treated as 'Content Before Heading' and prepended to the final data if a row count column is used.</p>
+        </div>
         <button id="mergeButton" disabled>🚀 Merge Files</button>
     </div>
 
     <div id="dataTableContainer">
         <h2>3. Merged Data</h2>
         <p>Upload and merge files to see the data table here.</p>
-        <table id="mergedDataTable" class="display compact" style="width:100%">
-            </table>
+        <table id="mergedDataTable" class="display compact" style="width:100%"></table>
     </div>
 
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
@@ -45,6 +52,16 @@
     <script src="https://cdn.datatables.net/buttons/2.2.2/js/dataTables.buttons.min.js"></script>
     <script src="https://cdn.datatables.net/buttons/2.2.2/js/buttons.html5.min.js"></script>
 
+    ```
+
+### 2. Modified JavaScript Logic
+
+The JavaScript is updated to:
+1.  Read the `headerRowNumber` input.
+2.  Use a new column (`__Content Before Heading__`) to store concatenated data from all rows *before* the specified header row.
+3.  Ensure all data rows (including the new column) are normalized to the correct length before merging.
+
+```javascript
     <script>
         // Global variable to store the final merged data (rows) and column headers
         let mergedData = [];
@@ -54,7 +71,7 @@
         // Utility function to enable/disable the merge button
         const updateMergeButton = () => {
             const hasFiles = Array.from(document.querySelectorAll('.excel-file-input'))
-                                   .some(input => input.files && input.files.length > 0);
+                                     .some(input => input.files && input.files.length > 0);
             document.getElementById('mergeButton').disabled = !hasFiles;
         };
 
@@ -79,6 +96,7 @@
             document.querySelectorAll('.excel-file-input').forEach(input => {
                 input.addEventListener('change', updateMergeButton);
             });
+            updateMergeButton(); // Run once on load
         });
 
         // -----------------------------------------------------------
@@ -90,6 +108,15 @@
             mergedData = [];
             headers = [];
             
+            // Read user settings
+            const headerRowNumber = parseInt(document.getElementById('headerRowNumber').value, 10);
+            const headerRowIndex = headerRowNumber - 1; // Convert 1-based index to 0-based index
+            
+            if (isNaN(headerRowNumber) || headerRowNumber < 1) {
+                alert('Please enter a valid Header Row Number (1 or greater).');
+                return;
+            }
+
             const fileInputs = document.querySelectorAll('.excel-file-input');
             const files = Array.from(fileInputs).flatMap(input => Array.from(input.files));
 
@@ -112,14 +139,14 @@
 
             // Process files sequentially
             for (const file of files) {
-                await processFile(file);
+                await processFile(file, headerRowIndex);
             }
 
             // Check if any data was merged
             if (mergedData.length > 0 && headers.length > 0) {
                 renderDataTable(headers, mergedData);
             } else {
-                document.getElementById('dataTableContainer').querySelector('p').textContent = 'No valid data was read from the uploaded files.';
+                document.getElementById('dataTableContainer').querySelector('p').textContent = 'No valid data was read or files had inconsistent header/column counts.';
                 document.getElementById('dataTableContainer').querySelector('p').style.display = 'block';
                 // Also clear the table header/body just in case
                 $('#mergedDataTable thead').empty(); 
@@ -128,43 +155,68 @@
         });
 
         /**
-         * Reads an Excel/CSV file using SheetJS.
+         * Reads an Excel/CSV file using SheetJS and processes based on a custom header index.
          * @param {File} file - The file object to read.
+         * @param {number} headerIndex - The 0-based index of the row to use as headers.
          */
-        function processFile(file) {
+        function processFile(file, headerIndex) {
             return new Promise((resolve) => {
                 const reader = new FileReader();
                 reader.onload = (e) => {
                     try {
                         const data = new Uint8Array(e.target.result);
-                        // SheetJS reads XLS, XLSX, and CSV automatically from array buffer
                         const workbook = XLSX.read(data, { type: 'array' });
                         const sheetName = workbook.SheetNames[0];
                         const worksheet = workbook.Sheets[sheetName];
                         
-                        // Convert sheet to array of arrays (header: 1)
+                        // Use header: 1 to get array of arrays (no object conversion yet)
                         const fileData = XLSX.utils.sheet_to_json(worksheet, { header: 1, raw: false });
 
-                        if (fileData.length === 0) {
-                            console.warn(`File ${file.name} is empty.`);
+                        if (fileData.length <= headerIndex) {
+                            console.warn(`File ${file.name} is too short. It only has ${fileData.length} rows, but header row ${headerIndex + 1} was requested.`);
                             return resolve();
                         }
 
-                        const fileHeaders = fileData[0] || [];
-                        const fileRows = fileData.slice(1);
-
-                        // 1. Handle Headers (Only once: take the headers from the first file)
-                        if (headers.length === 0 && fileHeaders.length > 0) {
-                            // Ensure headers are non-empty and set them
-                            headers = fileHeaders;
-                        } 
+                        // --- 1. DETERMINE HEADERS AND MAX COLUMN COUNT ---
+                        const fileHeaders = fileData[headerIndex] || [];
+                        const maxColCount = fileHeaders.length;
                         
-                        // 2. Append Rows
-                        // This simple merge assumes the column order is consistent.
-                        if (headers.length > 0 && fileHeaders.length === headers.length) {
-                            mergedData = mergedData.concat(fileRows);
+                        // --- 2. EXTRACT "CONTENT BEFORE HEADING" ---
+                        const preHeaderRows = fileData.slice(0, headerIndex);
+                        let contentBeforeHeading = '';
+                        if (preHeaderRows.length > 0) {
+                            // Concatenate all cells from pre-header rows into one string for the new column
+                            contentBeforeHeading = preHeaderRows.map(row => 
+                                row.filter(cell => cell !== null && cell !== undefined && String(cell).trim() !== '').join(' | ')
+                            ).filter(s => s !== '').join(' || ');
+                        }
+
+                        // --- 3. EXTRACT DATA ROWS ---
+                        const fileRows = fileData.slice(headerIndex + 1);
+
+                        // --- 4. HANDLE GLOBAL HEADERS (Only set them once from the first file)
+                        if (headers.length === 0 && maxColCount > 0) {
+                            headers = ['__Content Before Heading__', ...fileHeaders];
+                        }
+                        
+                        // --- 5. APPEND ROWS (Only if headers were set and column count matches) ---
+                        // We check against headers.length (which includes the new column)
+                        if (headers.length > 0 && maxColCount === headers.length - 1) {
+                            const normalizedRows = fileRows.map(row => {
+                                // Pad the row to match the length of fileHeaders (maxColCount)
+                                const paddedRow = [...row];
+                                while (paddedRow.length < maxColCount) {
+                                    paddedRow.push(null); 
+                                }
+                                // Prepend the 'Content Before Heading' column
+                                return [contentBeforeHeading, ...paddedRow.slice(0, maxColCount)];
+                            });
+                            
+                            mergedData = mergedData.concat(normalizedRows);
                         } else if (headers.length > 0) {
-                             console.warn(`Skipping rows from file ${file.name} due to header length mismatch (${fileHeaders.length} vs ${headers.length} columns).`);
+                             console.warn(`Skipping rows from file ${file.name} due to column count mismatch after header identification (${maxColCount} columns vs ${headers.length - 1} expected).`);
+                        } else if (fileRows.length > 0 && maxColCount === 0) {
+                            console.warn(`Skipping file ${file.name} because the specified header row ${headerIndex + 1} appears to be empty.`);
                         }
 
                     } catch (error) {
@@ -181,7 +233,7 @@
         }
 
         // -----------------------------------------------------------
-        // DATATABLES RENDER FUNCTION
+        // DATATABLES RENDER FUNCTION (Unchanged)
         // -----------------------------------------------------------
 
         /**
@@ -190,7 +242,7 @@
         function renderDataTable(cols, data) {
             // 1. Prepare DataTables Columns config
             const dtColumns = cols.map(header => ({ 
-                title: header,
+                title: header.replace(/__/g, ''), // Clean up the internal column name for display
                 defaultContent: "" 
             }));
 
